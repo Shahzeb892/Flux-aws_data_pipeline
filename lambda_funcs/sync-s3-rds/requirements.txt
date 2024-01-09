@@ -1,0 +1,6 @@
+boto3==1.34.14
+numpy==1.26.3
+pyyaml==6.0.1
+pandas==2.1.4
+pymysql
+sqlalchemy
