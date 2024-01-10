@@ -8,6 +8,7 @@ import re
 import numpy as np
 from botocore.exceptions import ClientError
 import logging
+import time
 import pymysql
 from sqlalchemy import create_engine, inspect, Table, Column, String, Integer, Float, Boolean, MetaData
 '''
@@ -76,8 +77,6 @@ class GlobalVars:
         #TODO: add new dtypes for new fields as required.
 
 
-    
-
 def get_batch_upload_metadata_dict(bucket,key):
     try:
         response = GlobalVars.s3.get_object(Bucket=bucket, Key=key)
@@ -124,6 +123,7 @@ def get_populated_df(batch_upload_metadata_dict):
 
         # check that incoming fields match what the DB is expecting.
         # TODO: make this more dynamic by allowing new fields/missing fields.
+        # TODO: Whats the error handling policy? write off the whole batch sync if one fails? Or ignore fails and upload what can be uploaded? (Latter)
         try:
             assert(columns == GlobalVars.columns_sorted)  
         except Exception as e:
@@ -144,12 +144,7 @@ def get_populated_df(batch_upload_metadata_dict):
         count+=1
     return df
 
-def connect_to_rds_and_upload_df():
-    '''
-    Connects to the RDS DB using create_engine
-    Lists available RDS tables using inspect().get_table_names()
-    If GlobalVars.table_name ("image_metadata") is not in this list, then we create a table called 'image_metadata' and populate it with the df
-    '''
+def connect_to_rds():
     log.info('Attempting to connect to RDS...')
     try:
         engine = create_engine(GlobalVars.database_uri)
@@ -157,35 +152,92 @@ def connect_to_rds_and_upload_df():
     except Exception as e:
         log.info("Failed to connect to the RDS instance due to the following exception {}.".format(e))
         raise e
+    return engine
+
+def create_new_table(engine):
+    try:
+        log.info("Creating new table in RDS called '{}'.".format(GlobalVars.table_name))
+        #required to create a table. 
+        db_metadata_obj = MetaData()
+
+        # Dynamically add columns to table: (table name and db_metadata_obj must be first two args)
+        args = [GlobalVars.table_name, 
+                db_metadata_obj]
+        for col in GlobalVars.columns_sorted:
+            if col == GlobalVars.primary_key:
+                args.append(Column(col, GlobalVars.columns_dtypes[col], primary_key=True))
+            else:
+                args.append(Column(col, GlobalVars.columns_dtypes[col]))
+
+        sql_table = Table(*args)
+        db_metadata_obj.create_all(engine)
+        log.info("Created new table {} in RDS".format(GlobalVars.table_name))
+
+        ''' 
+            Not sure if creating the table is async/takes time to show up.
+            So putting this while loop here to check the table exists before proceeding to upload data.
+        ''' 
+        log.info("Confirming table {} exists...".format(GlobalVars.table_name))
+        attempt_num = 0
+        max_attempts = 300
+        sleep_val = .2
+        max_time_secs = max_attempts/(1.0/sleep_val)
+        while True:
+            if attempt_num == max_attempts:
+                log.info("Table {} was created but is still not visible after {} seconds".format(GlobalVars.table_name, max_time_secs))
+                raise Exception("Table {} was created but is still not visible after {} seconds. Try increasing the value for 'max_attempts' (see lambda func), which is currently set to {}".format(GlobalVars.table_name, max_time_secs,max_attempts))
+            time.sleep(sleep_val)
+            insp = inspect(engine)
+            tables = insp.get_table_names()
+            if GlobalVars.table_name in tables:
+                log.info('Table creation confirmed for {}. Proceeding to upload...')
+                break
+            attempt_num+=1
+        return engine
+    except Exception as e:
+        log.info("Failed to create new table with name {} due to exception {}.".format(GlobalVars.table_name, e))
+        log.info("Upload to RDS Failed!")
+        raise e
+
+def table_exists(engine) -> bool:
+    '''
+    Connects to the RDS DB using create_engine
+    Lists available RDS tables using inspect().get_table_names()
+    If GlobalVars.table_name ("image_metadata") is not in this list, then we create a table called 'image_metadata' and populate it with the df
+    '''
     
     log.info("Checking if Table with name {} exists.".format(GlobalVars.table_name))
     try:
         insp = inspect(engine)
         tables = insp.get_table_names()
         if GlobalVars.table_name not in tables:
-            log.info("Table '{}' not found. Creating new table in RDS called '{}'.".format(GlobalVars.table_name, GlobalVars.table_name))
-            #required to create a table. Dont confuse with image metadata.
-            db_metadata_obj = MetaData()
+            log.info("Table '{}' not found.".format(GlobalVars.table_name))
+            return False
+            
+        else:
+            log.info("Table {} exists. Proceeding to upload latest image metadata to table {} in RDS...".format(GlobalVars.table_name, GlobalVars.table_name))
+            return True
 
-            # Dynamically add columns to table: (table name and db_metadata_obj must be first two args)
-            args = [GlobalVars.table_name, 
-                    db_metadata_obj]
-            for col in GlobalVars.columns_sorted:
-                if col == GlobalVars.primary_key:
-                    args.append(Column(col, GlobalVars.columns_dtypes[col], primary_key=True))
-                else:
-                    args.append(Column(col, GlobalVars.columns_dtypes[col]))
-
-            sql_table = Table(*args)
-            db_metadata_obj.create_all(engine)
-            log.info("Successfully created new table {} in RDS".format(GlobalVars.table_name))
-    except:
-        #TODO: Continue here.
-        pass
+    except Exception as e:
+        log.info("Failed to determine if table {} exists or not due to the exception {}...".format(GlobalVars.table_name, e))
+        raise e
 
 
-
-
+def upload_df_to_RDS_table(df, engine):
+    log.info("Uploading data to RDS...")
+    try:
+        # in this lambda func, we can assume incoming data is unique and doesnt exist in the table
+        df.to_sql(GlobalVars.table_name, con=engine, if_exists='append', index=False)
+        
+        #check new entries (only primary_key column) are in the Table - overkill?
+        sql_query = "SELECT {} FROM {}".format(GlobalVars.primary_key, GlobalVars.table_name)
+        uploaded_df_primary_key = pd.read_sql(sql_query, engine)
+        recent_uploads__np = np.array(df[GlobalVars.primary_key])
+        for i in range(len(recent_uploads__np)):
+            assert recent_uploads__np[i] in uploaded_df_primary_key[GlobalVars.primary_key]
+        log.info("Data uploaded to RDS succesfully.")
+    except Exception as e:
+        log.info("Failed to upload data to RDS")
 
 
 
@@ -193,11 +245,6 @@ def lambda_handler(event, context):
     # All events must come only from fluxfielduploads/batch_upload_metadata/
     # this gets specified in the Trigger configuration
     # in this case an event is the upload of batch upload metadata (one yaml file)
-    # Steps:
-    # 1 get batch upload metadata yaml file
-    # 3 from batch upload metadata yaml file extract names of image metadata yaml files uploaded to fluxfielduploads/metadata/, 
-    # insert into df that gets uploaded to the AWS RDS MySQL database
-    # TODO: stage autolabelling...
     
     bucket = event['Records'][0]['s3']['bucket']['name']
     key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'], encoding='utf-8')
@@ -207,38 +254,21 @@ def lambda_handler(event, context):
 
     # create and populate a df with incoming image metadata yamls
     df =  get_populated_df(batch_upload_metadata_dict)
+    engine = connect_to_rds()
 
-    #connect to the DB and add data to the table ("image_metadata"). If it doesnt exist, it gets created and populated.
-
-    #loop through each file in batch_upload_metadata_dict["uploaded_metadata_file_names"]
-    #
-    key_prefix = batch_upload_metadata_dict["bucket_path_to_metadata"]
-    bucket = batch_upload_metadata_dict["bucket_name"]
-    for file in batch_upload_metadata_dict["uploaded_metadata_file_names"]:
-        key = key_prefix+file
-        try:
-            response = GlobalVars.s3.get_object(Bucket=bucket, Key=key)
-            print("CONTENT TYPE: " + response['ContentType'])
-        except Exception as e:
-            print(e)
-            print('Error getting object {} from bucket {}. Make sure they exist and your bucket is in the same region as this function.'.format(key, bucket))
-            raise e
-        this_image_metadata = response.get("Body").read().decode("utf-8")
-        #as python dictionary
-        this_image_metadata_dict = yaml.safe_load(this_image_metadata)
-        
-        #ensure keys are sorted alphabetically (column integrity)
-        #print(this_image_metadata_dict.keys())
-        columns = list(np.sort(list(this_image_metadata_dict.keys())))  
-        row = []
-        # exit()
-        try:
-            for field in columns:
-                row.append(this_image_metadata_dict[field])
-            df.loc[count] =row 
-            count+=1
-        except Exception as e:
-            print(e)
-            print("Error occured when syncing metadata entries with metadata dataframe...")
-            raise e
+    # Note, table name and columns are specified in GlobalVars class above.
+    if table_exists(engine) == False:
+        engine = create_new_table(engine)
     
+    connection = engine.connect()
+    res = connection.execute("SELECT * FROM {}".format(GlobalVars.table_name))
+    table_cols = list(res.keys())
+    #check table columns match the image metadata fields as specified in GlobalVars.columns_sorted.
+    try:
+        assert(table_cols==GlobalVars.columns_sorted)
+        log.info("Table column names match the expected column names.")
+    except AssertionError as e:
+        log.info("Error: {e}. Table column names do not match expected column names. Upload to RDS failed.")
+
+    upload_df_to_RDS_table(df, engine)
+    log.info("Batch Upload of S3 image metadata is succesfully sync'd with RDS database.")
