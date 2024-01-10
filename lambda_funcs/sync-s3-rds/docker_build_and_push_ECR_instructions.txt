@@ -1,5 +1,7 @@
 As per "View Push COmmands" in Amazon ECR > Private registry > Repositories>lambda-function-docker-repository
 
+make sure to cd into aws-data-pipeline/lambda_funcs/sync-s3-rds/ before building.
+
 1. Retrieve an authentication token and authenticate your Docker client to your registry.
 Use the AWS CLI:
 

@@ -148,12 +148,14 @@ def connect_to_rds():
     log.info('Attempting to connect to RDS...')
     try:
         engine = create_engine(GlobalVars.database_uri)
+        print("Succesfully connected to RDS Database.")
         log.info("Succesfully connected to RDS Database.")
     except Exception as e:
         log.info("Failed to connect to the RDS instance due to the following exception {}.".format(e))
         raise e
     return engine
 
+#not needed, df.to_sql, can create it for us.
 def create_new_table(engine):
     try:
         log.info("Creating new table in RDS called '{}'.".format(GlobalVars.table_name))
@@ -209,8 +211,8 @@ def table_exists(engine) -> bool:
     log.info("Checking if Table with name {} exists.".format(GlobalVars.table_name))
     try:
         #insp = inspect(engine)
-        tables = engine.table_names() #insp.get_table_names()
-        if GlobalVars.table_name not in tables:
+        #tables = engine.table_names() #insp.get_table_names()
+        if engine.dialect.has_table(engine, GlobalVars.table_name) == False:# GlobalVars.table_name not in tables:
             log.info("Table '{}' not found.".format(GlobalVars.table_name))
             return False
             
@@ -255,20 +257,20 @@ def lambda_handler(event, context):
     # create and populate a df with incoming image metadata yamls
     df =  get_populated_df(batch_upload_metadata_dict)
     engine = connect_to_rds()
-
-    # Note, table name and columns are specified in GlobalVars class above.
-    if table_exists(engine) == False:
-        engine = create_new_table(engine)
     
+   
+    #check first if table exists, 
+    #if so assert that columns are as expected
     connection = engine.connect()
-    res = connection.execute("SELECT * FROM {}".format(GlobalVars.table_name))
-    table_cols = list(res.keys())
-    #check table columns match the image metadata fields as specified in GlobalVars.columns_sorted.
-    try:
-        assert(table_cols==GlobalVars.columns_sorted)
-        log.info("Table column names match the expected column names.")
-    except AssertionError as e:
-        log.info("Error: {e}. Table column names do not match expected column names. Upload to RDS failed.")
-
+    if connection.has_table(GlobalVars.table_name):
+        res = connection.execute("SELECT * FROM {}".format(GlobalVars.table_name))
+        table_cols = list(res.keys())
+        #check table columns match the image metadata fields as specified in GlobalVars.columns_sorted.
+        try:
+            assert(table_cols==GlobalVars.columns_sorted)
+            log.info("Table column names match the expected column names.")
+        except AssertionError as e:
+            log.info("Error: {e}. Table column names do not match expected column names. Upload to RDS failed.")
+    # else, df.to_sql creates a new table with table_name
     upload_df_to_RDS_table(df, engine)
     log.info("Batch Upload of S3 image metadata is succesfully sync'd with RDS database.")
