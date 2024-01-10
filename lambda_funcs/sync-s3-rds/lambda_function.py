@@ -208,8 +208,8 @@ def table_exists(engine) -> bool:
     
     log.info("Checking if Table with name {} exists.".format(GlobalVars.table_name))
     try:
-        insp = inspect(engine)
-        tables = insp.get_table_names()
+        #insp = inspect(engine)
+        tables = engine.table_names() #insp.get_table_names()
         if GlobalVars.table_name not in tables:
             log.info("Table '{}' not found.".format(GlobalVars.table_name))
             return False
