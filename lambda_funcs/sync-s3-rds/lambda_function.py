@@ -235,13 +235,17 @@ def upload_df_to_RDS_table(df, engine):
         
         #check new entries (only primary_key column) are in the Table - overkill?
         sql_query = "SELECT {} FROM {}".format(GlobalVars.primary_key, GlobalVars.table_name)
-        uploaded_df_primary_key = pd.read_sql(sql_query, engine)
-        recent_uploads__np = np.array(df[GlobalVars.primary_key])
-        for i in range(len(recent_uploads__np)):
-            assert recent_uploads__np[i] in uploaded_df_primary_key[GlobalVars.primary_key]
+        
+        db_df_primary_key_col = pd.read_sql(sql_query, engine)
+        recent_uploads_np = np.array(df[GlobalVars.primary_key])
+
+        db_df_primary_key_col_as_np = np.array(db_df_primary_key_col[GlobalVars.primary_key])
+        for i in range(len(recent_uploads_np)):
+            assert recent_uploads_np[i] in db_df_primary_key_col_as_np
         log.info("Data uploaded to RDS succesfully.")
     except Exception as e:
-        log.error("Failed to upload data to RDS")
+        log.error("Failed to upload data to RDS due to {}".format(e))
+        raise e
 
 def check_existing_table_columns(engine, table_name):
     # this is a work around after struggling to get other approaches to work
