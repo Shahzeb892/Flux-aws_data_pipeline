@@ -10,7 +10,9 @@ from botocore.exceptions import ClientError
 import logging
 import time
 import pymysql
-from sqlalchemy import create_engine, inspect, Table, Column, String, Integer, Float, Boolean, MetaData
+from aws_lambda_powertools import Logger
+from sqlalchemy import create_engine, inspect, text, Table, Column, String, Integer, Float, Boolean, MetaData
+log = Logger()
 '''
 Containerisation of Lambda functions is required as deployment packages of dependencies are too large.
 resources: 
@@ -19,9 +21,9 @@ https://medium.com/@dogukannulu/how-to-create-amazon-lambda-function-with-the-co
 https://medium.com/@dogukannulu/establishing-a-vpc-for-amazon-s3-lambda-rds-and-ec2-8f3aa53b5429
 '''
 
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-log = logging.getLogger(__name__)
+#logging.basicConfig(level=logging.INFO,
+                    # format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+#logging.getLogger()#(__name__)
 
 class GlobalVars:
     s3 = boto3.client('s3')
@@ -30,7 +32,7 @@ class GlobalVars:
     db_username = os.getenv('database_username')
     db_password = os.getenv('database_password')
     db_endpoint = os.getenv('database_endpoint')
-    db_port = 3306 # may need to change...
+    db_port = 3306 # aws defined for rds
     database_uri = f"mysql+pymysql://{db_username}:{db_password}@{db_endpoint}:{db_port}/{db_name}"
     table_name = 'image_metadata'
     '''
@@ -84,7 +86,7 @@ def get_batch_upload_metadata_dict(bucket,key):
         #return response['ContentType']
     except Exception as e:
         print('Failed to get object {} from bucket {} due to exception: {}'.format(key, bucket, e))
-        log.info('Failed to get object {} from bucket {} due to exception: {}'.format(key, bucket, e))
+        log.error('Failed to get object {} from bucket {} due to exception: {}'.format(key, bucket, e))
         raise e
     log.info('Succesfully retrieved batch upload metadata yaml {} from s3 bucket {}'.format(key, bucket))
     #1 get the recently uploaded batch metadata yaml
@@ -111,10 +113,10 @@ def get_populated_df(batch_upload_metadata_dict):
             response = GlobalVars.s3.get_object(Bucket=bucket, Key=key)
         except Exception as e:
             print('Failed to get object {} from bucket {} due to exception: {}'.format(key, bucket, e))
-            log.info('Failed to get object {} from bucket {} due to exception: {}'.format(key, bucket, e))
+            log.error('Failed to get object {} from bucket {} due to exception: {}'.format(key, bucket, e))
             raise e
         this_image_metadata = response.get("Body").read().decode("utf-8")
-        log.info("Succesfully")
+        log.info("Succesfully loaded image metadata file {} from bucket {} batch_upload_metadata file from S3.".format(key, bucket))
         #as python dictionary
         this_image_metadata_dict = yaml.safe_load(this_image_metadata)
         
@@ -135,7 +137,7 @@ def get_populated_df(batch_upload_metadata_dict):
             for field in GlobalVars.columns_sorted:
                 if field not in columns:
                     missing_fields.append(field)
-            log.info("Fields from image metadata file {} do not match the column fields of the DB. \nUnexpected fields provided in the image metadata are: {}. \nExpected fields that are missing from the image metadata are: {}".format(file,new_fields,missing_fields))
+            log.error("Fields from image metadata file {} do not match the column fields of the DB. \nUnexpected fields provided in the image metadata are: {}. \nExpected fields that are missing from the image metadata are: {}".format(file,new_fields,missing_fields))
             raise e
         row = []
         for field in columns:
@@ -151,7 +153,7 @@ def connect_to_rds():
         print("Succesfully connected to RDS Database.")
         log.info("Succesfully connected to RDS Database.")
     except Exception as e:
-        log.info("Failed to connect to the RDS instance due to the following exception {}.".format(e))
+        log.error("Failed to connect to the RDS instance due to the following exception {}.".format(e))
         raise e
     return engine
 
@@ -186,7 +188,7 @@ def create_new_table(engine):
         max_time_secs = max_attempts/(1.0/sleep_val)
         while True:
             if attempt_num == max_attempts:
-                log.info("Table {} was created but is still not visible after {} seconds".format(GlobalVars.table_name, max_time_secs))
+                log.error("Table {} was created but is still not visible after {} seconds".format(GlobalVars.table_name, max_time_secs))
                 raise Exception("Table {} was created but is still not visible after {} seconds. Try increasing the value for 'max_attempts' (see lambda func), which is currently set to {}".format(GlobalVars.table_name, max_time_secs,max_attempts))
             time.sleep(sleep_val)
             insp = inspect(engine)
@@ -197,8 +199,8 @@ def create_new_table(engine):
             attempt_num+=1
         return engine
     except Exception as e:
-        log.info("Failed to create new table with name {} due to exception {}.".format(GlobalVars.table_name, e))
-        log.info("Upload to RDS Failed!")
+        log.error("Failed to create new table with name {} due to exception {}.".format(GlobalVars.table_name, e))
+        log.error("Upload to RDS Failed!")
         raise e
 
 def table_exists(engine) -> bool:
@@ -221,7 +223,7 @@ def table_exists(engine) -> bool:
             return True
 
     except Exception as e:
-        log.info("Failed to determine if table {} exists or not due to the exception {}...".format(GlobalVars.table_name, e))
+        log.error("Failed to determine if table {} exists or not due to the exception {}...".format(GlobalVars.table_name, e))
         raise e
 
 
@@ -239,9 +241,29 @@ def upload_df_to_RDS_table(df, engine):
             assert recent_uploads__np[i] in uploaded_df_primary_key[GlobalVars.primary_key]
         log.info("Data uploaded to RDS succesfully.")
     except Exception as e:
-        log.info("Failed to upload data to RDS")
+        log.error("Failed to upload data to RDS")
 
-
+def check_existing_table_columns(engine, table_name):
+    # this is a work around after struggling to get other approaches to work
+    sql_query = "SELECT * FROM {}".format(table_name)
+    result = pd.read_sql(sql_query, engine)
+    if len(result.keys()):
+        #table exists and has columns 
+        # need to check cols
+        cols = list(result.keys())
+        try:
+            assert(cols==GlobalVars.columns_sorted)
+            log.info("Table column names match the expected column names.")
+        except AssertionError as e:
+            log.error("Error: {}. Table column names do not match expected column names. Upload to RDS failed.".format(e))
+            #TODO: handle case where table has different columns... create new table? OR, Modify the existing table to include old and new cols?
+            raise Exception("Error: {}. Table column names do not match expected column names. Upload to RDS failed.".format(e))
+    else:
+        log.info("No table with table_name {} exists. It will be created now.".format(GlobalVars.table_name))
+    result.close()
+    return
+    
+    
 
 def lambda_handler(event, context):
     # All events must come only from fluxfielduploads/batch_upload_metadata/
@@ -259,18 +281,26 @@ def lambda_handler(event, context):
     engine = connect_to_rds()
     
    
-    #check first if table exists, 
-    #if so assert that columns are as expected
-    connection = engine.connect()
-    if connection.has_table(GlobalVars.table_name):
-        res = connection.execute("SELECT * FROM {}".format(GlobalVars.table_name))
-        table_cols = list(res.keys())
+    # check first if table exists, 
+    # if so assert that columns are as expected
+    
+    if GlobalVars.table_name in inspect(engine).get_table_names():
+        # connection = engine.connect()
+        with engine.connect() as conn:
+            res = conn.execute(text("SELECT * FROM {};".format(GlobalVars.table_name)))
+            table_cols = list(res.keys())
+            # res.close()
+        # connection.close()
         #check table columns match the image metadata fields as specified in GlobalVars.columns_sorted.
         try:
             assert(table_cols==GlobalVars.columns_sorted)
             log.info("Table column names match the expected column names.")
         except AssertionError as e:
-            log.info("Error: {e}. Table column names do not match expected column names. Upload to RDS failed.")
-    # else, df.to_sql creates a new table with table_name
+            log.error("Error: {}. Table column names do not match expected column names. Upload to RDS failed.".format(e))
+            #TODO: handle case where table has different columns...
+            raise Exception("Error: {}. Table column names do not match expected column names. Upload to RDS failed.".format(e))
+        
+    else:
+        log.info("Table with table_name {} doesn't exist. A new table with that table name will be created and populated with the latest batch upload.")
     upload_df_to_RDS_table(df, engine)
     log.info("Batch Upload of S3 image metadata is succesfully sync'd with RDS database.")
