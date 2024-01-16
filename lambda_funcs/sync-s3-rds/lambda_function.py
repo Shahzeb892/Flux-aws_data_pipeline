@@ -43,7 +43,7 @@ class GlobalVars:
     Use columns_sorted below to maintain column order integrity.
     '''
     columns = [ "camera_number",
-                "camera_name",
+                "camera_model",
                 "class_mappings",
                 "crop",
                 "customer",
@@ -52,7 +52,7 @@ class GlobalVars:
                 "image_capture_datetime_utc_iso",
                 "image_file_path_S3",
                 "image_metadata_file_path_S3",
-                "lens_name",
+                "lens_model",
                 "robot_model",
                 "yolo_text_file_data",
                 "auto_labelled_yolo_text_file_data",
@@ -63,7 +63,10 @@ class GlobalVars:
                 "upload_start_datetime_utc_iso",
                 "batch_upload_metadata_filename",
                 "auto_labels_filtered_by_user",
-                "manually_labelled_by_user"]
+                "manually_labelled_by_user",
+                "gps_coordinates",
+                "velocity_mmps",
+                "focal_point_height_above_crop_bed_mm"]
     columns_sorted = list(np.sort(columns))
     
     #how we identify each table entry
@@ -74,6 +77,8 @@ class GlobalVars:
     for col in columns_sorted:
         if col in ["auto_labelled", "auto_labels_filtered", "manually_labelled"]:
             columns_dtypes[col] = Boolean
+        elif col in ["velocity_mmps", "focal_point_height_above_crop_bed_mm"]:
+            columns_dtypes[col] = Float
         else:
             columns_dtypes[col] = String
         #TODO: add new dtypes for new fields as required.
@@ -282,6 +287,11 @@ def lambda_handler(event, context):
 
     # create and populate a df with incoming image metadata yamls
     df =  get_populated_df(batch_upload_metadata_dict)
+
+    # convert ''s to NaNs (Null in SQL)
+    df = df.replace('', np.nan)
+    # convert Nones to NaNs
+    df = df.fillna(value=np.nan)
     engine = connect_to_rds()
     
    
@@ -305,6 +315,8 @@ def lambda_handler(event, context):
             raise Exception("Error: {}. Table column names do not match expected column names. Upload to RDS failed.".format(e))
         
     else:
+        #table doesnt exist, create it in create_new_table. this also sets dtypes (as opposed to df.to_sql).
+        engine = create_new_table(engine)
         log.info("Table with table_name {} doesn't exist. A new table with that table name will be created and populated with the latest batch upload.")
     upload_df_to_RDS_table(df, engine)
     log.info("Batch Upload of S3 image metadata is succesfully sync'd with RDS database.")
