@@ -11,6 +11,7 @@ import logging
 import time
 import pymysql
 from aws_lambda_powertools import Logger
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy import create_engine, inspect, text, Table, Column, String, Integer, Float, Boolean, MetaData
 log = Logger()
 '''
@@ -80,7 +81,7 @@ class GlobalVars:
         elif col in ["velocity_mmps", "focal_point_height_above_crop_bed_mm"]:
             columns_dtypes[col] = Float
         else:
-            columns_dtypes[col] = String
+            columns_dtypes[col] = LONGTEXT
         #TODO: add new dtypes for new fields as required.
 
 
@@ -236,7 +237,7 @@ def upload_df_to_RDS_table(df, engine):
     log.info("Uploading data to RDS...")
     try:
         # in this lambda func, we can assume incoming data is unique and doesnt exist in the table
-        df.to_sql(GlobalVars.table_name, con=engine, if_exists='append', index=False)
+        df.to_sql(GlobalVars.table_name, con=engine, if_exists='append', index=False, dtype=GlobalVars.columns_dtypes)
         
         #check new entries (only primary_key column) are in the Table - overkill?
         sql_query = "SELECT {} FROM {}".format(GlobalVars.primary_key, GlobalVars.table_name)
@@ -315,8 +316,7 @@ def lambda_handler(event, context):
             raise Exception("Error: {}. Table column names do not match expected column names. Upload to RDS failed.".format(e))
         
     else:
-        #table doesnt exist, create it in create_new_table. this also sets dtypes (as opposed to df.to_sql).
-        engine = create_new_table(engine)
+        #table doesnt exist, new tabel to be created using df.t_sql... and specification of dtypes
         log.info("Table with table_name {} doesn't exist. A new table with that table name will be created and populated with the latest batch upload.")
     upload_df_to_RDS_table(df, engine)
     log.info("Batch Upload of S3 image metadata is succesfully sync'd with RDS database.")
