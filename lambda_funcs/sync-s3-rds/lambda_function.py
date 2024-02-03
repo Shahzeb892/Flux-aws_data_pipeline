@@ -319,4 +319,7 @@ def lambda_handler(event, context):
         #table doesnt exist, new tabel to be created using df.t_sql... and specification of dtypes
         log.info("Table with table_name {} doesn't exist. A new table with that table name will be created and populated with the latest batch upload.")
     upload_df_to_RDS_table(df, engine)
+
+    # todo: Do duplicate removal here. This can happen for a few reasons 
+    # i.e. the field machine uploading the images has done two randomized uploads, and some files have snuck in twice
     log.info("Batch Upload of S3 image metadata is succesfully sync'd with RDS database.")

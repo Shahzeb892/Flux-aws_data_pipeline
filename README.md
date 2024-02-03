@@ -7,7 +7,15 @@ Repo for aws infrastructure code, i.e. lambda functions to process uploads (from
 # cvat stuff here
 
 
-## Building CVAT-Nuclio-yolo (This only gets done once)
+## Building CVAT-Nuclio-yolo (This gets done once, but note, changes won't persist in cvat/yolo submodules)
+
+Resources:
+CVAT: https://opencv.github.io/cvat/docs/administration/basics/installation/#how-to-pullbuildupdate-cvat-images
+CVAT-Nuclio-Yolo: https://medium.com/@eng.fadishaar/automating-object-annotation-in-cvat-using-a-custom-yolov5-model-cfd36fb40a97
+
+Note, if pulling this repo (containing submodule refs to the cvat and yolo submodules) for the first time, there will be no persistence of the nuclio-yolo setup.
+
+Therefore, once pulled, you will need to set up your local repo as follows:
 
 ### Step 1 Clone cvat as a submodule referenced in the aws-data-pipeline repo
 Run: 

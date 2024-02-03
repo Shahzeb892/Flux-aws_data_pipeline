@@ -1,0 +1,124 @@
+CVAT-Nuclio-Yolo Webserver Deployment on EC2 
+
+Beware the multitude of versions/releases of cvat. I ran into many issues pulling the generic repo (git clone https://github.com/opencv/cvat) as per the installation instructions (https://opencv.github.io/cvat/docs/administration/basics/installation/)
+
+The reason for this is that as versions have evovled, container names have changed (cvat_proxy becomes traefik), new containers have been created (cvat container in earlier versions is broken up into multiple containers) and constructions of docker-compose.yml files have changed, such that the generic install instructions are misleading if followed. I.e. container names have changed, new containers have been created in later versions. This makes debugging a nightmare.
+
+What works: 
+CVAT: v2.10.2 (git clone -b v2.10.2 https://github.com/opencv/cvat)
+Nuclio: 1.8.14
+Yolov5
+Ec2: t2.xlarge ubuntu instances with security allowing both inbound ssh and https.
+
+the build-cvat-ec2-webserver directory contains:
+- docker compose yaml (.yml) files
+- function.yaml (for nuclio)
+- main.py (specify which model and confidence threshold to use in here)
+- all model weights in pytorch format (.pt suffix)
+- Note the model that gets set will be the one specified in main.py
+
+
+Setting up the ec2 instance to host CVAT-Nuclio-Yolov5:
+
+# launch the instance
+# scp  (recusrively, -rp -i) the directory (containing build files) to the instance
+
+# ssh into the instance.
+
+# Do updates:
+sudo apt-get update
+sudo apt-get --no-install-recommends install -y \
+  apt-transport-https \
+  ca-certificates \
+  curl \
+  gnupg-agent \
+  software-properties-common
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo add-apt-repository \
+  "deb [arch=amd64] https://download.docker.com/linux/ubuntu \
+  $(lsb_release -cs) \
+  stable"
+sudo apt-get update
+sudo apt-get --no-install-recommends install -y \
+  docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+#also need to run (for nuclio):
+sudo apt-get install docker-buildx-plugin
+
+
+sudo groupadd docker
+sudo usermod -aG docker $USER
+
+# exit the instance for user assignment for docker 
+
+# ssh back into instance and run:
+groups
+
+# "docker" should be in the print out
+
+#clone CVAT v2.10.2 repo:
+
+git clone -b v2.10.2 https://github.com/opencv/cvat
+cd cvat/
+
+# download/softlink nuclio:
+wget https://github.com/nuclio/nuclio/releases/download/1.8.14/nuctl-1.8.14-linux-amd64
+sudo chmod +x $(pwd)/nuctl-1.8.14-linux-amd64
+sudo ln -sf $(pwd)/nuctl-1.8.14-linux-amd64 /usr/local/bin/nuctl
+
+# Required For mounting storage for workers doing labelling jobs:
+sudo mkdir /mnt/share 
+
+# v2.10.2 needs directory structure modified (for nuclio):
+
+mkdir ./serverless/pytorch/ultralytics
+mkdir ./serverless/pytorch/ultralytics/yolov5
+mkdir ./serverless/pytorch/ultralytics/yolov5/nuclio
+
+# cd into nuclio dir
+
+cd ~/cvat/serverless/pytorch/ultralytics/yolov5/nuclio
+
+# clone the yolov5 repo
+
+git clone https://github.com/ultralytics/yolov5.git
+
+#move files where we need them:
+cd ~/
+
+# nuclio serverlerss docker compose is in it's own dir
+mv ./build-cvat-ec2-webserver/docker-compose.serverless.yml ./cvat/components/serverless/
+
+# all the others go to cvat/
+mv ./build-cvat-ec2-webserver/*.yml ./cvat/
+
+# the remaining files (weights (.pt suffix), function.yaml, and main.py) to nuclio dir...
+mv ./build-cvat-ec2-webserver/*.pt  ./cvat/serverless/pytorch/ultralytics/yolov5/nuclio/
+mv ./build-cvat-ec2-webserver/function.yaml  ./cvat/serverless/pytorch/ultralytics/yolov5/nuclio/
+mv ./build-cvat-ec2-webserver/main.py ./cvat/serverless/pytorch/ultralytics/yolov5/nuclio/
+
+
+# cd into cvat
+cd ~/cvat/
+
+# export ACME_EMAIL and CVAT_HOST en vars
+# note this needs to be done each time you ssh into the instance.
+# get Public_IPv4_DNS of ec2 instance
+
+export ACME_EMAIL=INSERT_EMAIL_ADDRESS
+export CVAT_HOST=INSERT_Public_IPv4_DNS
+
+# build the fleet of containers
+docker compose -f docker-compose.yml -f docker-compose.https.yml -f components/serverless/docker-compose.serverless.yml build
+
+# Run the containers
+docker compose -f docker-compose.yml -f docker-compose.https.yml -f components/serverless/docker-compose.serverless.yml up -d
+
+# Deploy the serverless nuclio-yolov5 automated annotation 
+
+./serverless/deploy_cpu.sh serverless/pytorch/ultralytics/yolov5
+
+
+# if deploying for the first time, you need to create a super-user
+
+
